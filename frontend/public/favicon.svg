@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="32" height="32" rx="6" fill="url(#grad)"/>
+
+  <!-- Envelope -->
+  <rect x="6" y="10" width="20" height="14" rx="2" fill="none" stroke="white" stroke-width="2"/>
+  <path d="M6 12 L16 18 L26 12" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- Plus circle (加号) -->
+  <circle cx="23" cy="13" r="3" fill="white"/>
+  <path d="M23 11.5 L23 14.5 M21.5 13 L24.5 13" stroke="#0ea5e9" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

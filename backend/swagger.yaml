@@ -1,0 +1,809 @@
+openapi: 3.0.0
+info:
+  title: 子邮箱验证码接收系统 API
+  version: 1.0.0
+  description: |
+    邮件验证码接收系统 - 支持卡片查询、激活、批量导入
+
+    ## 认证说明
+    大部分接口需要在请求头中携带 JWT Token:
+    ```
+    Authorization: Bearer {your_token}
+    ```
+  contact:
+    email: support@example.com
+
+servers:
+  - url: http://localhost:3000/api
+    description: 本地开发服务器
+  - url: https://api.yourdomain.com/api
+    description: 生产服务器
+
+tags:
+  - name: auth
+    description: 认证相关接口
+  - name: emails
+    description: 邮件相关接口
+  - name: user
+    description: 用户相关接口
+  - name: admin
+    description: 管理员接口
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'JWT Token认证，格式: Bearer {token}'
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Error message"
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        is_admin:
+          type: integer
+        status:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    Email:
+      type: object
+      properties:
+        id:
+          type: integer
+        user_id:
+          type: integer
+        from_addr:
+          type: string
+        subject:
+          type: string
+        body_html:
+          type: string
+        body_text:
+          type: string
+        extracted_code:
+          type: string
+          nullable: true
+        is_read:
+          type: integer
+        tag_id:
+          type: integer
+          nullable: true
+        priority:
+          type: integer
+        received_at:
+          type: string
+          format: date-time
+
+paths:
+  /captcha:
+    get:
+      tags:
+        - auth
+      summary: 获取数学验证码
+      description: 生成一个简单的数学题验证码（a + b = ?）
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question:
+                    type: string
+                    example: "3 + 7 = ?"
+                  answer:
+                    type: integer
+                    example: 10
+
+  /auth/register:
+    post:
+      tags:
+        - auth
+      summary: 用户注册
+      description: 用户使用子邮箱和密码注册账号
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  example: "test123@aihubzone.shop"
+                password:
+                  type: string
+                  format: password
+                  example: "password123"
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Registration successful"
+        '400':
+          description: 参数错误或邮箱不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/login:
+    post:
+      tags:
+        - auth
+      summary: 用户登录
+      description: 用户登录获取 JWT Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+                - captchaAnswer
+                - captchaExpected
+              properties:
+                email:
+                  type: string
+                  example: "test123@aihubzone.shop"
+                password:
+                  type: string
+                  format: password
+                  example: "password123"
+                captchaAnswer:
+                  type: integer
+                  example: 10
+                  description: 用户输入的验证码答案
+                captchaExpected:
+                  type: integer
+                  example: 10
+                  description: 从 /captcha 接口获取的正确答案
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  accessToken:
+                    type: string
+                  refreshToken:
+                    type: string
+        '401':
+          description: 认证失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/refresh:
+    post:
+      tags:
+        - auth
+      summary: 刷新 Token
+      description: 使用 Refresh Token 获取新的 Access Token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refreshToken
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: 刷新成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                  refreshToken:
+                    type: string
+
+  /auth/me:
+    get:
+      tags:
+        - auth
+      summary: 获取当前用户信息
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      userId:
+                        type: integer
+                      email:
+                        type: string
+                      isAdmin:
+                        type: boolean
+
+  /emails:
+    get:
+      tags:
+        - emails
+      summary: 获取邮件列表
+      description: 获取当前用户的邮件列表（支持分页、搜索、标签过滤）
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: keyword
+          in: query
+          description: 搜索关键词（标题、发件人、正文）
+          schema:
+            type: string
+        - name: tagId
+          in: query
+          description: 标签ID过滤
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Email'
+
+  /emails/{id}:
+    get:
+      tags:
+        - emails
+      summary: 获取邮件详情
+      description: 获取邮件详情并标记为已读
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Email'
+        '404':
+          description: 邮件不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags:
+        - emails
+      summary: 删除邮件
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '404':
+          description: 邮件不存在
+
+  /emails/{id}/tag:
+    put:
+      tags:
+        - emails
+      summary: 为邮件打标签
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tagId
+              properties:
+                tagId:
+                  type: integer
+                  example: 1
+      responses:
+        '200':
+          description: 成功
+
+  /emails/fetch:
+    post:
+      tags:
+        - emails
+      summary: 手动刷新邮件
+      description: 触发立即拉取IMAP邮件
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  count:
+                    type: integer
+
+  /tags:
+    get:
+      tags:
+        - emails
+      summary: 获取标签列表
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    name_zh:
+                      type: string
+                    name_en:
+                      type: string
+
+  /user/password:
+    put:
+      tags:
+        - user
+      summary: 修改密码
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - oldPassword
+                - newPassword
+              properties:
+                oldPassword:
+                  type: string
+                  format: password
+                newPassword:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: 修改成功
+
+  /user/stats:
+    get:
+      tags:
+        - user
+      summary: 获取用户统计信息
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unreadCount:
+                    type: integer
+                  totalCount:
+                    type: integer
+                  todayCount:
+                    type: integer
+
+  /admin/dashboard:
+    get:
+      tags:
+        - admin
+      summary: 获取仪表盘数据
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  todayEmails:
+                    type: integer
+                  totalUsers:
+                    type: integer
+                  activeUsers:
+                    type: integer
+                  recentErrors:
+                    type: array
+                    items:
+                      type: object
+                  emailSuccessRate:
+                    type: string
+
+  /admin/subemails/generate:
+    post:
+      tags:
+        - admin
+      summary: 生成子邮箱
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - count
+                - domain
+              properties:
+                count:
+                  type: integer
+                  example: 100
+                  description: 生成数量（1-1000）
+                domain:
+                  type: string
+                  example: "aihubzone.shop"
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  count:
+                    type: integer
+                  subemails:
+                    type: array
+                    items:
+                      type: string
+
+  /admin/subemails:
+    get:
+      tags:
+        - admin
+      summary: 获取子邮箱列表
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+        - name: isAssigned
+          in: query
+          description: 是否已分配（true/false）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  /admin/users:
+    get:
+      tags:
+        - admin
+      summary: 获取用户列表
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+        - name: keyword
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+
+  /admin/users/{id}/status:
+    put:
+      tags:
+        - admin
+      summary: 禁用/启用用户
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - status
+              properties:
+                status:
+                  type: integer
+                  enum: [0, 1]
+                  description: 0=正常, 1=禁用
+      responses:
+        '200':
+          description: 成功
+
+  /admin/users/{id}:
+    delete:
+      tags:
+        - admin
+      summary: 删除用户
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 删除成功
+
+  /admin/users/{id}/password:
+    put:
+      tags:
+        - admin
+      summary: 重置用户密码
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - newPassword
+              properties:
+                newPassword:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: 重置成功
+
+  /admin/users/{id}/unlock:
+    put:
+      tags:
+        - admin
+      summary: 解锁用户账号
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: 解锁成功
+
+  /admin/settings:
+    get:
+      tags:
+        - admin
+      summary: 获取系统配置
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 成功
+
+    put:
+      tags:
+        - admin
+      summary: 更新系统配置
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                imap_server:
+                  type: string
+                imap_port:
+                  type: string
+                imap_user:
+                  type: string
+                imap_pass:
+                  type: string
+      responses:
+        '200':
+          description: 更新成功
+
+  /admin/settings/test-imap:
+    post:
+      tags:
+        - admin
+      summary: 测试IMAP连接
+      description: 测试IMAP配置是否正确，发送测试邮件到配置的邮箱
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - imap_server
+                - imap_port
+                - imap_user
+                - imap_pass
+              properties:
+                imap_server:
+                  type: string
+                  example: "imap.qq.com"
+                imap_port:
+                  type: string
+                  example: "993"
+                imap_user:
+                  type: string
+                  example: "318352733@qq.com"
+                imap_pass:
+                  type: string
+                  example: "xjnxfmgzcogfbjij"
+      responses:
+        '200':
+          description: 连接成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "IMAP connection successful"
+        '400':
+          description: 连接失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /admin/logs:
+    get:
+      tags:
+        - admin
+      summary: 获取系统日志
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+        - name: type
+          in: query
+          description: 日志类型过滤
+          schema:
+            type: string
+            enum: [login, admin_op, email_fetch, error]
+      responses:
+        '200':
+          description: 成功
