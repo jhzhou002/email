@@ -62,7 +62,7 @@ const form = ref({
   confirmPassword: ''
 })
 
-const validateConfirm = (rule: any, value: any, callback: any) => {
+const validateConfirm = (_rule: any, value: any, callback: any) => {
   if (value !== form.value.newPassword) {
     callback(new Error('两次密码输入不一致'))
   } else {

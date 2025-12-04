@@ -6,7 +6,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: (to) => {
+      redirect: () => {
         const authStore = useAuthStore()
         if (!authStore.isLoggedIn) {
           return '/login'

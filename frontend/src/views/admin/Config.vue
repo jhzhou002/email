@@ -215,7 +215,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { adminAPI } from '@/api/admin'
 
 const imapFormRef = ref<FormInstance>()
@@ -308,19 +308,22 @@ const loadSettings = async () => {
     // 注意：由于响应拦截器会将 snake_case 转换为 camelCase
     // 所以这里使用 camelCase 的键名
     if (settings.imapServer) {
+      const imapPort = settings.imapPort ? parseInt(settings.imapPort) : 993
+      const checkInterval = settings.checkInterval ? parseInt(settings.checkInterval) : 5
       imapConfig.value = {
         imap_server: settings.imapServer || '',
-        imap_port: parseInt(settings.imapPort) || 993,
+        imap_port: imapPort || 993,
         imap_user: settings.imapUser || '',
         imap_pass: settings.imapPass || '',
-        check_interval: parseInt(settings.checkInterval) || 5
+        check_interval: checkInterval || 5
       }
     }
 
     if (settings.smtpServer) {
+      const smtpPort = settings.smtpPort ? parseInt(settings.smtpPort) : 587
       smtpConfig.value = {
         smtp_server: settings.smtpServer || '',
-        smtp_port: parseInt(settings.smtpPort) || 587,
+        smtp_port: smtpPort || 587,
         smtp_user: settings.smtpUser || '',
         smtp_pass: settings.smtpPass || ''
       }

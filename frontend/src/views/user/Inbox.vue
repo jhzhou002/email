@@ -193,7 +193,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -214,13 +214,11 @@ import {
 import { emailAPI } from '@/api/email'
 import { userAPI } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
-import { useAppStore } from '@/stores/app'
 import type { Email, Tag, UserStats } from '@/types'
 
 const router = useRouter()
 const { t, locale } = useI18n()
 const authStore = useAuthStore()
-const appStore = useAppStore()
 
 const loading = ref(false)
 const emails = ref<(Email & { selected?: boolean })[]>([])

@@ -179,7 +179,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { User, MessageBox, Message, PriceTag, Monitor, Tools, Document } from '@element-plus/icons-vue'
+import { User, Message, PriceTag, Monitor, Tools, Document } from '@element-plus/icons-vue'
 import { adminAPI } from '@/api/admin'
 
 const router = useRouter()

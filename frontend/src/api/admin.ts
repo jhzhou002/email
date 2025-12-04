@@ -1,10 +1,18 @@
 import api from './index'
-import type { PaginationData } from '@/types'
+import type {
+  DashboardStats,
+  Email,
+  PaginationData,
+  Subemail,
+  SystemSettings,
+  Tag,
+  User
+} from '@/types'
 
 export const adminAPI = {
   // 仪表盘
   getDashboard: () => {
-    return api.get('/admin/dashboard')
+    return api.get<any, DashboardStats>('/admin/dashboard')
   },
 
   // 生成子邮箱
@@ -14,12 +22,12 @@ export const adminAPI = {
 
   // 获取子邮箱列表
   getSubemails: (params: { page?: number; pageSize?: number; isAssigned?: boolean }) => {
-    return api.get<any, PaginationData<any>>('/admin/subemails', { params })
+    return api.get<any, PaginationData<Subemail>>('/admin/subemails', { params })
   },
 
   // 获取用户列表
   getUsers: (params: { page?: number; pageSize?: number; keyword?: string }) => {
-    return api.get<any, PaginationData<any>>('/admin/users', { params })
+    return api.get<any, PaginationData<User>>('/admin/users', { params })
   },
 
   // 禁用/启用用户
@@ -44,7 +52,7 @@ export const adminAPI = {
 
   // 获取所有邮件
   getAllEmails: (params: { page?: number; pageSize?: number }) => {
-    return api.get<any, PaginationData<any>>('/admin/emails', { params })
+    return api.get<any, PaginationData<Email>>('/admin/emails', { params })
   },
 
   // 删除邮件（管理员）
@@ -54,12 +62,12 @@ export const adminAPI = {
 
   // 添加标签
   addTag: (nameZh: string, nameEn: string) => {
-    return api.post('/admin/tags', { nameZh, nameEn })
+    return api.post<any, Tag>('/admin/tags', { nameZh, nameEn })
   },
 
   // 更新标签
   updateTag: (id: number, nameZh: string, nameEn: string) => {
-    return api.put(`/admin/tags/${id}`, { nameZh, nameEn })
+    return api.put<any, Tag>(`/admin/tags/${id}`, { nameZh, nameEn })
   },
 
   // 删除标签
@@ -69,7 +77,7 @@ export const adminAPI = {
 
   // 获取系统配置
   getSettings: () => {
-    return api.get('/admin/settings')
+    return api.get<any, SystemSettings>('/admin/settings')
   },
 
   // 更新系统配置

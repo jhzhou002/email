@@ -1,30 +1,35 @@
 export interface User {
-  userId: number
+  id: number
+  userId?: number
   email: string
   isAdmin: boolean
+  status: number
+  isLocked: boolean
+  createdAt?: string
+  lastLoginAt?: string | null
 }
 
 export interface Email {
   id: number
-  user_id: number
-  from_addr: string
-  to_addr: string
+  userId: number
+  fromAddr: string
+  toAddr: string
   subject: string
-  body_html: string | null
-  body_text: string | null
-  extracted_code: string | null
-  is_read: number
-  tag_id: number | null
+  bodyHtml: string | null
+  bodyText: string | null
+  extractedCode: string | null
+  isRead: number
+  tagId: number | null
   priority: number
-  received_at: string
-  created_at: string
+  receivedAt: string
+  createdAt: string
 }
 
 export interface Tag {
   id: number
-  name_zh: string
-  name_en: string
-  created_at: string
+  nameZh: string
+  nameEn: string
+  createdAt: string
 }
 
 export interface PaginationData<T> {
@@ -49,4 +54,38 @@ export interface UserStats {
   unreadCount: number
   totalCount: number
   todayCount: number
+}
+
+export interface SystemSettings {
+  imapServer?: string
+  imapPort?: string
+  imapUser?: string
+  imapPass?: string
+  checkInterval?: string
+  smtpServer?: string
+  smtpPort?: string
+  smtpUser?: string
+  smtpPass?: string
+  mainDomain?: string
+}
+
+export interface DashboardStats {
+  totalUsers: number
+  newUsersToday: number
+  totalEmails: number
+  newEmailsToday: number
+  totalSubemails: number
+  assignedSubemails: number
+  totalTags: number
+  usedTags: number
+  imapStatus: boolean
+  databaseStatus: boolean
+}
+
+export interface Subemail {
+  id: number
+  email: string
+  assignedUserId: number | null
+  userEmail: string | null
+  createdAt: string
 }
