@@ -180,6 +180,7 @@ export class EmailService {
       for (const message of recentMessages) {
         try {
           // 解析邮件
+          if (!message.source) continue;
           const parsed = await simpleParser(message.source);
 
           // 提取收件人
