@@ -85,7 +85,8 @@ export interface DashboardStats {
 export interface Subemail {
   id: number
   email: string
+  remark: string
   assignedUserId: number | null
   userEmail: string | null
-  createdAt: string
+  updatedAt: string
 }
