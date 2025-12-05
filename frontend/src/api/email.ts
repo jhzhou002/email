@@ -23,7 +23,7 @@ export const emailAPI = {
   },
 
   // 为邮件打标签
-  tagEmail: (id: number, tagId: number) => {
+  tagEmail: (id: number, tagId: number | null) => {
     return api.put(`/emails/${id}/tag`, { tagId })
   },
 

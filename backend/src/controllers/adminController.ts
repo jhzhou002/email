@@ -54,6 +54,77 @@ export class AdminController {
   }
 
   /**
+   * 添加子邮箱
+   */
+  async addSubemail(req: AuthRequest, res: Response) {
+    try {
+      const { email, remark } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ message: 'Email is required' });
+      }
+
+      const id = await adminService.addSubemail(email, remark);
+
+      return res.json({ message: 'Subemail added successfully', id });
+    } catch (error: any) {
+      console.error('Add subemail error:', error);
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(400).json({ message: '该邮箱地址已存在' });
+      }
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
+  /**
+   * 更新子邮箱
+   */
+  async updateSubemail(req: AuthRequest, res: Response) {
+    try {
+      const id = parseInt(req.params.id);
+      const { email, remark } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ message: 'Email is required' });
+      }
+
+      const success = await adminService.updateSubemail(id, email, remark);
+
+      if (!success) {
+        return res.status(404).json({ message: 'Subemail not found' });
+      }
+
+      return res.json({ message: 'Subemail updated successfully' });
+    } catch (error: any) {
+      console.error('Update subemail error:', error);
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(400).json({ message: '该邮箱地址已存在' });
+      }
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
+  /**
+   * 删除子邮箱
+   */
+  async deleteSubemail(req: AuthRequest, res: Response) {
+    try {
+      const id = parseInt(req.params.id);
+
+      const success = await adminService.deleteSubemail(id);
+
+      if (!success) {
+        return res.status(404).json({ message: 'Subemail not found' });
+      }
+
+      return res.json({ message: 'Subemail deleted successfully' });
+    } catch (error: any) {
+      console.error('Delete subemail error:', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+
+  /**
    * 获取用户列表
    */
   async getUsers(req: AuthRequest, res: Response) {

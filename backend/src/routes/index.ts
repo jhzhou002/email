@@ -60,6 +60,9 @@ router.get('/admin/dashboard', authMiddleware, adminMiddleware, adminController.
 // 子邮箱管理
 router.post('/admin/subemails/generate', authMiddleware, adminMiddleware, adminController.generateSubemails.bind(adminController));
 router.get('/admin/subemails', authMiddleware, adminMiddleware, adminController.getSubemails.bind(adminController));
+router.post('/admin/subemails', authMiddleware, adminMiddleware, adminController.addSubemail.bind(adminController));
+router.put('/admin/subemails/:id', authMiddleware, adminMiddleware, adminController.updateSubemail.bind(adminController));
+router.delete('/admin/subemails/:id', authMiddleware, adminMiddleware, adminController.deleteSubemail.bind(adminController));
 
 // 用户管理
 router.get('/admin/users', authMiddleware, adminMiddleware, adminController.getUsers.bind(adminController));

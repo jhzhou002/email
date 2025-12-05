@@ -70,6 +70,42 @@ export class AdminService {
   }
 
   /**
+   * 添加子邮箱
+   */
+  async addSubemail(email: string, remark?: string): Promise<number> {
+    const [result] = await pool.query<ResultSetHeader>(
+      'INSERT INTO subemails (email, remark) VALUES (?, ?)',
+      [email, remark || '']
+    );
+
+    return result.insertId;
+  }
+
+  /**
+   * 更新子邮箱
+   */
+  async updateSubemail(id: number, email: string, remark?: string): Promise<boolean> {
+    const [result] = await pool.query<ResultSetHeader>(
+      'UPDATE subemails SET email = ?, remark = ? WHERE id = ?',
+      [email, remark || '', id]
+    );
+
+    return result.affectedRows > 0;
+  }
+
+  /**
+   * 删除子邮箱
+   */
+  async deleteSubemail(id: number): Promise<boolean> {
+    const [result] = await pool.query<ResultSetHeader>(
+      'DELETE FROM subemails WHERE id = ?',
+      [id]
+    );
+
+    return result.affectedRows > 0;
+  }
+
+  /**
    * 获取用户列表
    */
   async getUsers(page: number = 1, pageSize: number = 20, keyword?: string) {

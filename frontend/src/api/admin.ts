@@ -25,6 +25,21 @@ export const adminAPI = {
     return api.get<any, PaginationData<Subemail>>('/admin/subemails', { params })
   },
 
+  // 添加子邮箱
+  addSubemail: (email: string, remark?: string) => {
+    return api.post('/admin/subemails', { email, remark })
+  },
+
+  // 更新子邮箱
+  updateSubemail: (id: number, email: string, remark?: string) => {
+    return api.put(`/admin/subemails/${id}`, { email, remark })
+  },
+
+  // 删除子邮箱
+  deleteSubemail: (id: number) => {
+    return api.delete(`/admin/subemails/${id}`)
+  },
+
   // 获取用户列表
   getUsers: (params: { page?: number; pageSize?: number; keyword?: string }) => {
     return api.get<any, PaginationData<User>>('/admin/users', { params })

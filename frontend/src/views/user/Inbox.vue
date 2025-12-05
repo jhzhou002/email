@@ -5,8 +5,12 @@
       <div class="header-left">
         <el-button text :icon="Menu" @click="drawerVisible = !drawerVisible" class="menu-btn" />
         <div class="logo">
-          <el-icon :size="24" color="#ea4335"><Message /></el-icon>
-          <span class="logo-text">邮箱系统</span>
+          <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="2"/>
+            <path d="M3 7L12 13L21 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="17" cy="9" r="2" fill="currentColor"/>
+          </svg>
+          <span class="logo-text">加号邮箱</span>
         </div>
       </div>
 
@@ -64,8 +68,7 @@
         <div class="sidebar-content">
           <!-- 统计卡片 -->
           <el-card class="stats-card" shadow="never">
-            <div class="stat-item">
-              <el-icon color="#ea4335"><Message /></el-icon>
+            <div class="stat-item-center">
               <div class="stat-info">
                 <div class="stat-value">{{ stats.unreadCount }}</div>
                 <div class="stat-label">未读邮件</div>
@@ -121,17 +124,6 @@
               </span>
             </span>
           </div>
-          <div class="toolbar-right">
-            <el-pagination
-              small
-              background
-              layout="prev, pager, next"
-              :total="total"
-              :page-size="pageSize"
-              :current-page="currentPage"
-              @current-change="handlePageChange"
-            />
-          </div>
         </div>
 
         <!-- 邮件列表 -->
@@ -176,16 +168,54 @@
 
             <div class="email-item-right">
               <div class="email-time">{{ formatTime(email.receivedAt) }}</div>
-              <el-button
-                text
-                :icon="Delete"
-                @click.stop="handleDelete(email.id)"
-                class="delete-btn"
-              />
+              <div class="email-actions">
+                <el-dropdown @command="(tagId: number) => handleTagEmail(email.id, tagId)" trigger="click">
+                  <el-button
+                    text
+                    :icon="PriceTag"
+                    @click.stop
+                    class="tag-btn"
+                  />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item :command="null">
+                        <span style="color: #909399">清除标签</span>
+                      </el-dropdown-item>
+                      <el-dropdown-item
+                        v-for="tag in tags"
+                        :key="tag.id"
+                        :command="tag.id"
+                      >
+                        <el-icon v-if="email.tagId === tag.id" color="#67c23a"><Check /></el-icon>
+                        {{ locale === 'zh' ? tag.nameZh : tag.nameEn }}
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button
+                  text
+                  :icon="Delete"
+                  @click.stop="handleDelete(email.id)"
+                  class="delete-btn"
+                />
+              </div>
             </div>
           </div>
 
           <el-empty v-if="!loading && emails.length === 0" description="暂无邮件" />
+        </div>
+
+        <!-- 底部分页 -->
+        <div class="email-pagination" v-if="total > 0">
+          <el-pagination
+            small
+            background
+            layout="prev, pager, next"
+            :total="total"
+            :page-size="pageSize"
+            :current-page="currentPage"
+            @current-change="handlePageChange"
+          />
         </div>
       </el-main>
     </el-container>
@@ -209,7 +239,8 @@ import {
   Star,
   Key,
   Tickets,
-  PriceTag
+  PriceTag,
+  Check
 } from '@element-plus/icons-vue'
 import { emailAPI } from '@/api/email'
 import { userAPI } from '@/api/user'
@@ -297,6 +328,16 @@ const handleDelete = async (id: number) => {
     loadStats()
   } catch (error) {
     // 用户取消或错误
+  }
+}
+
+const handleTagEmail = async (emailId: number, tagId: number | null) => {
+  try {
+    await emailAPI.tagEmail(emailId, tagId)
+    ElMessage.success(tagId ? '标签已设置' : '标签已清除')
+    loadEmails()
+  } catch (error) {
+    ElMessage.error('设置标签失败')
   }
 }
 
@@ -404,6 +445,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
+  color: #0ea5e9;
 }
 
 .logo-text {
@@ -606,7 +653,7 @@ onUnmounted(() => {
 
 .email-item {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 16px;
   padding: 12px 16px;
   border-bottom: 1px solid #f0f0f0;
@@ -635,8 +682,9 @@ onUnmounted(() => {
 
 .email-item-left {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+  padding-top: 4px;
 }
 
 .priority-icon {
@@ -646,6 +694,9 @@ onUnmounted(() => {
 .email-item-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
 }
 
 .email-from {
@@ -690,9 +741,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   min-width: 100px;
+  padding-top: 4px;
 }
 
 .email-time {
@@ -701,12 +753,29 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.email-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tag-btn,
 .delete-btn {
   opacity: 0;
   transition: opacity 0.2s;
 }
 
+.email-item:hover .tag-btn,
 .email-item:hover .delete-btn {
   opacity: 1;
+}
+
+.email-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px 0;
+  border-top: 1px solid #f0f0f0;
+  background: #fff;
 }
 </style>

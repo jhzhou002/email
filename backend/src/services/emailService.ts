@@ -8,6 +8,8 @@ export class EmailService {
   private imapClient: ImapFlow | null = null;
   private fetchInterval: NodeJS.Timeout | null = null;
   private consecutiveFailures = 0;
+  private isConnecting = false;
+  private lastConnectionAttempt = 0;
 
   /**
    * 启动IMAP邮件拉取定时任务
@@ -41,18 +43,34 @@ export class EmailService {
   /**
    * 停止邮件拉取
    */
-  stopEmailFetching() {
+  async stopEmailFetching() {
     if (this.fetchInterval) {
       clearInterval(this.fetchInterval);
       this.fetchInterval = null;
     }
 
-    if (this.imapClient) {
-      this.imapClient.logout();
-      this.imapClient = null;
-    }
+    await this.closeImapConnection();
 
     console.log('Email fetching service stopped');
+  }
+
+  /**
+   * 安全关闭IMAP连接
+   */
+  private async closeImapConnection() {
+    if (this.imapClient) {
+      try {
+        // 检查连接状态
+        if (this.imapClient.usable) {
+          await this.imapClient.logout();
+        }
+      } catch (error: any) {
+        // 忽略关闭时的错误
+        console.debug('Error closing IMAP connection:', error.message);
+      } finally {
+        this.imapClient = null;
+      }
+    }
   }
 
   /**
@@ -68,6 +86,64 @@ export class EmailService {
   }
 
   /**
+   * 连接或重连IMAP
+   */
+  private async ensureImapConnection(config: any): Promise<void> {
+    // 防止并发连接
+    if (this.isConnecting) {
+      throw new Error('Connection attempt already in progress');
+    }
+
+    // 限制重连频率（至少间隔5秒）
+    const now = Date.now();
+    if (now - this.lastConnectionAttempt < 5000) {
+      throw new Error('Too frequent connection attempts');
+    }
+
+    this.isConnecting = true;
+    this.lastConnectionAttempt = now;
+
+    try {
+      // 检查现有连接是否可用
+      if (this.imapClient && this.imapClient.usable) {
+        this.isConnecting = false;
+        return;
+      }
+
+      // 关闭旧连接
+      await this.closeImapConnection();
+
+      // 创建新连接
+      this.imapClient = new ImapFlow({
+        host: config.imap_server,
+        port: parseInt(config.imap_port),
+        secure: true,
+        auth: {
+          user: config.imap_user,
+          pass: config.imap_pass
+        },
+        logger: false
+      });
+
+      // 监听连接关闭事件
+      this.imapClient.on('close', () => {
+        console.log('📭 IMAP connection closed');
+        this.imapClient = null;
+      });
+
+      this.imapClient.on('error', (err) => {
+        console.error('📭 IMAP connection error:', err.message);
+        this.imapClient = null;
+      });
+
+      await this.imapClient.connect();
+      console.log('📬 IMAP connected successfully');
+    } finally {
+      this.isConnecting = false;
+    }
+  }
+
+  /**
    * 拉取邮件
    */
   private async fetchEmails(): Promise<number> {
@@ -78,20 +154,11 @@ export class EmailService {
         throw new Error('IMAP configuration not found');
       }
 
-      // 连接IMAP
-      if (!this.imapClient) {
-        this.imapClient = new ImapFlow({
-          host: config.imap_server,
-          port: parseInt(config.imap_port),
-          secure: true,
-          auth: {
-            user: config.imap_user,
-            pass: config.imap_pass
-          },
-          logger: false
-        });
+      // 确保IMAP连接
+      await this.ensureImapConnection(config);
 
-        await this.imapClient.connect();
+      if (!this.imapClient) {
+        throw new Error('Failed to establish IMAP connection');
       }
 
       // 打开收件箱
@@ -172,6 +239,16 @@ export class EmailService {
       // 重置失败计数
       this.consecutiveFailures = 0;
 
+      // 更新IMAP检查状态为成功
+      try {
+        await pool.query(
+          'INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
+          ['last_imap_check', 'success', 'success']
+        );
+      } catch (error) {
+        // 忽略更新状态错误
+      }
+
       // 记录日志
       await this.logFetch('success', `Fetched ${processedCount} new emails`);
 
@@ -181,31 +258,39 @@ export class EmailService {
 
       console.error('Email fetch error:', error.message);
 
+      // 更新IMAP检查状态为失败
+      try {
+        await pool.query(
+          'INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
+          ['last_imap_check', 'failed', 'failed']
+        );
+      } catch (updateError) {
+        // 忽略更新状态错误
+      }
+
       // 记录错误日志
-      await this.logFetch('error', `Failed to fetch emails: ${error.message}`);
+      try {
+        await this.logFetch('error', `Failed to fetch emails: ${error.message}`);
+      } catch (logError) {
+        // 忽略日志记录错误
+      }
 
       // 连续失败3次显示警告
       if (this.consecutiveFailures >= 3) {
         console.warn(`⚠️ Email fetching has failed ${this.consecutiveFailures} times consecutively`);
       }
 
-      // 连续失败10次暂停服务
-      if (this.consecutiveFailures >= 10) {
+      // 连续失败20次暂停服务（给更多重试机会）
+      if (this.consecutiveFailures >= 20) {
         console.error('❌ Too many consecutive failures. Stopping email fetch service.');
-        this.stopEmailFetching();
+        await this.stopEmailFetching();
       }
 
-      // 重置连接
-      if (this.imapClient) {
-        try {
-          await this.imapClient.logout();
-        } catch (e) {
-          // 忽略登出错误
-        }
-        this.imapClient = null;
-      }
+      // 关闭失败的连接
+      await this.closeImapConnection();
 
-      throw error;
+      // 不抛出错误，让服务继续运行
+      return 0;
     }
   }
 
@@ -379,7 +464,7 @@ export class EmailService {
   /**
    * 为邮件打标签
    */
-  async tagEmail(emailId: number, userId: number, tagId: number): Promise<boolean> {
+  async tagEmail(emailId: number, userId: number, tagId: number | null): Promise<boolean> {
     const [result] = await pool.query<ResultSetHeader>(
       'UPDATE emails SET tag_id = ? WHERE id = ? AND user_id = ?',
       [tagId, emailId, userId]

@@ -4,7 +4,22 @@
       <!-- 左侧导航栏 -->
       <el-aside width="200px" class="admin-sidebar">
         <div class="logo-section">
-          <h3>管理后台</h3>
+          <svg class="logo-icon" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="admin-logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:#0ea5e9;stop-opacity:1" />
+                <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:1" />
+              </linearGradient>
+            </defs>
+            <!-- Email envelope -->
+            <rect x="15" y="30" width="70" height="45" rx="3" fill="none" stroke="url(#admin-logo-gradient)" stroke-width="3"/>
+            <path d="M 15 30 L 50 55 L 85 30" fill="none" stroke="url(#admin-logo-gradient)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+            <!-- Plus symbol -->
+            <circle cx="75" cy="25" r="15" fill="url(#admin-logo-gradient)"/>
+            <line x1="75" y1="17" x2="75" y2="33" stroke="white" stroke-width="3" stroke-linecap="round"/>
+            <line x1="67" y1="25" x2="83" y2="25" stroke="white" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+          <h3>加号邮箱后台</h3>
         </div>
         <el-menu
           :default-active="activeMenu"
@@ -149,12 +164,22 @@ const handleCommand = (command: string) => {
   text-align: center;
   color: #fff;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-section .logo-icon {
+  width: 50px;
+  height: 50px;
 }
 
 .logo-section h3 {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .admin-sidebar .el-menu {

@@ -76,17 +76,16 @@ export class EmailController {
       const emailId = parseInt(req.params.id);
       const { tagId } = req.body;
 
-      if (!tagId) {
-        return res.status(400).json({ message: 'Tag ID is required' });
-      }
+      // tagId可以为null（清除标签）
+      const parsedTagId = tagId === null ? null : parseInt(tagId);
 
-      const success = await emailService.tagEmail(emailId, userId, parseInt(tagId));
+      const success = await emailService.tagEmail(emailId, userId, parsedTagId);
 
       if (!success) {
         return res.status(404).json({ message: 'Email not found' });
       }
 
-      return res.json({ message: 'Email tagged successfully' });
+      return res.json({ message: parsedTagId ? 'Email tagged successfully' : 'Tag removed successfully' });
     } catch (error: any) {
       console.error('Tag email error:', error);
       return res.status(500).json({ message: 'Internal server error' });

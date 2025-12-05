@@ -4,9 +4,14 @@
       <template #header>
         <div class="card-header">
           <span>子邮箱列表</span>
-          <el-button type="primary" :icon="Plus" @click="generateDialogVisible = true">
-            生成子邮箱
-          </el-button>
+          <div class="header-buttons">
+            <el-button type="success" :icon="Plus" @click="handleAdd">
+              添加子邮箱
+            </el-button>
+            <el-button type="primary" :icon="Plus" @click="generateDialogVisible = true">
+              批量生成
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -19,28 +24,38 @@
       </div>
 
       <el-table :data="subemails" v-loading="loading" style="width: 100%" border>
-        <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="email" label="邮箱地址" min-width="250" />
-        <el-table-column label="状态" width="100">
+        <el-table-column prop="id" label="ID" width="80" align="center" />
+        <el-table-column prop="email" label="邮箱地址" min-width="200" />
+        <el-table-column prop="remark" label="备注" min-width="150">
+          <template #default="{ row }">
+            {{ row.remark || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="row.assignedUserId ? 'success' : 'info'">
               {{ row.assignedUserId ? '已分配' : '未分配' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="assignedUserId" label="用户ID" width="100">
-          <template #default="{ row }">
-            {{ row.assignedUserId || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="用户邮箱" min-width="200">
+        <el-table-column label="用户邮箱" min-width="180">
           <template #default="{ row }">
             {{ row.userEmail || '-' }}
           </template>
         </el-table-column>
-        <el-table-column prop="createdAt" label="创建时间" width="180">
+        <el-table-column prop="updatedAt" label="更新时间" width="180" align="center">
           <template #default="{ row }">
-            {{ formatDate(row.createdAt) }}
+            {{ formatDate(row.updatedAt) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="handleEdit(row)">
+              编辑
+            </el-button>
+            <el-button link type="danger" size="small" @click="handleDelete(row.id)">
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -59,8 +74,37 @@
       </div>
     </el-card>
 
+    <!-- 添加/编辑子邮箱对话框 -->
+    <el-dialog v-model="editDialogVisible" :title="isEdit ? '编辑子邮箱' : '添加子邮箱'" width="500px">
+      <el-form :model="editForm" :rules="editRules" ref="editFormRef" label-width="100px">
+        <el-form-item label="邮箱地址" prop="email">
+          <el-input
+            v-model="editForm.email"
+            placeholder="请输入完整的邮箱地址"
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="备注" prop="remark">
+          <el-input
+            v-model="editForm.remark"
+            type="textarea"
+            :rows="3"
+            placeholder="请输入备注信息（可选）"
+            maxlength="255"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleSubmit" :loading="submitLoading">
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 生成子邮箱对话框 -->
-    <el-dialog v-model="generateDialogVisible" title="生成子邮箱" width="500px" @open="handleDialogOpen">
+    <el-dialog v-model="generateDialogVisible" title="批量生成子邮箱" width="500px" @open="handleDialogOpen">
       <el-form :model="generateForm" :rules="generateRules" ref="generateFormRef" label-width="100px">
         <el-form-item label="生成数量" prop="count">
           <el-input-number
@@ -89,16 +133,17 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { adminAPI } from '@/api/admin'
 
 interface Subemail {
   id: number
   email: string
+  remark: string
   assignedUserId: number | null
   userEmail: string | null
-  createdAt: string
+  updatedAt: string
 }
 
 const loading = ref(false)
@@ -108,6 +153,25 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const filterAssigned = ref<boolean | undefined>(undefined)
 
+// 编辑对话框
+const editDialogVisible = ref(false)
+const isEdit = ref(false)
+const currentSubemail = ref<Subemail | null>(null)
+const submitLoading = ref(false)
+const editFormRef = ref<FormInstance>()
+const editForm = ref({
+  email: '',
+  remark: ''
+})
+
+const editRules: FormRules = {
+  email: [
+    { required: true, message: '请输入邮箱地址', trigger: 'blur' },
+    { type: 'email', message: '请输入正确的邮箱格式', trigger: 'blur' }
+  ]
+}
+
+// 生成对话框
 const generateDialogVisible = ref(false)
 const generateLoading = ref(false)
 const generateFormRef = ref<FormInstance>()
@@ -190,6 +254,58 @@ const handleGenerate = async () => {
   })
 }
 
+const handleAdd = () => {
+  isEdit.value = false
+  currentSubemail.value = null
+  editForm.value = { email: '', remark: '' }
+  editDialogVisible.value = true
+}
+
+const handleEdit = (row: Subemail) => {
+  isEdit.value = true
+  currentSubemail.value = row
+  editForm.value = { email: row.email, remark: row.remark || '' }
+  editDialogVisible.value = true
+}
+
+const handleDelete = async (id: number) => {
+  try {
+    await ElMessageBox.confirm('确定要删除这个子邮箱吗？', '警告', { type: 'warning' })
+    await adminAPI.deleteSubemail(id)
+    ElMessage.success('删除成功')
+    loadSubemails()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
+  }
+}
+
+const handleSubmit = async () => {
+  if (!editFormRef.value) return
+
+  await editFormRef.value.validate(async (valid) => {
+    if (!valid) return
+
+    submitLoading.value = true
+    try {
+      if (isEdit.value && currentSubemail.value) {
+        await adminAPI.updateSubemail(currentSubemail.value.id, editForm.value.email, editForm.value.remark)
+        ElMessage.success('更新成功')
+      } else {
+        await adminAPI.addSubemail(editForm.value.email, editForm.value.remark)
+        ElMessage.success('添加成功')
+      }
+      editDialogVisible.value = false
+      loadSubemails()
+    } catch (error) {
+      ElMessage.error(isEdit.value ? '更新失败' : '添加失败')
+    } finally {
+      submitLoading.value = false
+    }
+  })
+}
+
 const formatDate = (dateStr: string) => {
   const date = new Date(dateStr)
   return date.toLocaleString('zh-CN', {
@@ -215,6 +331,11 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.header-buttons {
+  display: flex;
+  gap: 8px;
 }
 
 .table-toolbar {

@@ -153,14 +153,14 @@
       </template>
 
       <el-table :data="recentLogs" v-loading="logsLoading" style="width: 100%">
-        <el-table-column prop="action" label="操作" width="100">
+        <el-table-column prop="type" label="操作" width="120">
           <template #default="{ row }">
-            <el-tag :type="getActionType(row.action)" size="small">
-              {{ row.action }}
+            <el-tag :type="getActionType(row.type)" size="small">
+              {{ getTypeLabel(row.type) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="description" label="描述" min-width="300" show-overflow-tooltip />
+        <el-table-column prop="content" label="描述" min-width="300" show-overflow-tooltip />
         <el-table-column prop="createdAt" label="时间" width="180">
           <template #default="{ row }">
             {{ formatDate(row.createdAt) }}
@@ -227,16 +227,24 @@ const loadRecentLogs = async () => {
   }
 }
 
-const getActionType = (action: string) => {
+const getActionType = (type: string) => {
   const typeMap: Record<string, string> = {
     'login': 'primary',
-    'create': 'success',
-    'update': 'warning',
-    'delete': 'danger',
-    'export': 'info',
-    'other': 'info'
+    'admin_op': 'warning',
+    'email_fetch': 'success',
+    'error': 'danger'
   }
-  return typeMap[action] || 'info'
+  return typeMap[type] || 'info'
+}
+
+const getTypeLabel = (type: string) => {
+  const labelMap: Record<string, string> = {
+    'login': '登录',
+    'admin_op': '管理操作',
+    'email_fetch': '邮件抓取',
+    'error': '错误'
+  }
+  return labelMap[type] || type
 }
 
 const formatDate = (dateStr: string) => {

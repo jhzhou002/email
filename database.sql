@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS `subemails` (
   `email` VARCHAR(255) NOT NULL UNIQUE COMMENT '子邮箱地址',
   `is_assigned` TINYINT(1) DEFAULT 0 COMMENT '是否已分配 0否 1是',
   `assigned_user_id` INT NULL COMMENT '分配给的用户ID',
+  `remark` VARCHAR(255) DEFAULT '' COMMENT '备注',
   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '生成时间',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   INDEX `idx_is_assigned` (`is_assigned`),
   FOREIGN KEY (`assigned_user_id`) REFERENCES `users`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='子邮箱池';

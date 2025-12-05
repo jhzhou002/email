@@ -37,6 +37,17 @@
           />
         </el-form-item>
 
+        <el-form-item prop="confirmPassword">
+          <el-input
+            v-model="form.confirmPassword"
+            type="password"
+            placeholder="请再次输入密码"
+            size="large"
+            :prefix-icon="Lock"
+            show-password
+          />
+        </el-form-item>
+
         <el-button
           type="primary"
           @click="handleRegister"
@@ -74,14 +85,28 @@ const loading = ref(false)
 
 const form = ref({
   email: '',
-  password: ''
+  password: '',
+  confirmPassword: ''
 })
+
+const validateConfirmPassword = (rule: any, value: any, callback: any) => {
+  if (value === '') {
+    callback(new Error('请再次输入密码'))
+  } else if (value !== form.value.password) {
+    callback(new Error('两次输入的密码不一致'))
+  } else {
+    callback()
+  }
+}
 
 const rules: FormRules = {
   email: [{ required: true, message: t('auth.emailPlaceholder'), trigger: 'blur' }],
   password: [
     { required: true, message: t('auth.passwordPlaceholder'), trigger: 'blur' },
     { min: 6, message: '密码至少6位', trigger: 'blur' }
+  ],
+  confirmPassword: [
+    { required: true, validator: validateConfirmPassword, trigger: 'blur' }
   ]
 }
 
