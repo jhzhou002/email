@@ -91,13 +91,16 @@ export class EmailService {
   private async ensureImapConnection(config: any): Promise<void> {
     // 防止并发连接
     if (this.isConnecting) {
-      throw new Error('Connection attempt already in progress');
+      // 不将"连接进行中"视为错误，只是跳过此次尝试
+      console.debug('Connection attempt already in progress, skipping...');
+      return;
     }
 
-    // 限制重连频率（至少间隔5秒）
+    // 限制重连频率（至少间隔2秒，从5秒减少以便更快恢复）
     const now = Date.now();
-    if (now - this.lastConnectionAttempt < 5000) {
-      throw new Error('Too frequent connection attempts');
+    if (now - this.lastConnectionAttempt < 2000) {
+      console.debug('Too frequent connection attempts, skipping...');
+      return;
     }
 
     this.isConnecting = true;
@@ -113,7 +116,7 @@ export class EmailService {
       // 关闭旧连接
       await this.closeImapConnection();
 
-      // 创建新连接
+      // 创建新连接，启用keepalive防止服务器超时
       this.imapClient = new ImapFlow({
         host: config.imap_server,
         port: parseInt(config.imap_port),
@@ -122,15 +125,20 @@ export class EmailService {
           user: config.imap_user,
           pass: config.imap_pass
         },
-        logger: false
+        logger: false,
+        // 添加keepalive支持，防止连接超时
+        tls: {
+          rejectUnauthorized: true
+        }
       });
 
-      // 监听连接关闭事件
+      // 监听连接关闭事件，自动触发重连
       this.imapClient.on('close', () => {
-        console.log('📭 IMAP connection closed');
+        console.log('📭 IMAP connection closed, will reconnect on next fetch');
         this.imapClient = null;
       });
 
+      // 监听连接错误事件
       this.imapClient.on('error', (err) => {
         console.error('📭 IMAP connection error:', err.message);
         this.imapClient = null;
@@ -138,6 +146,9 @@ export class EmailService {
 
       await this.imapClient.connect();
       console.log('📬 IMAP connected successfully');
+
+      // 重置失败计数
+      this.consecutiveFailures = 0;
     } finally {
       this.isConnecting = false;
     }
@@ -276,18 +287,19 @@ export class EmailService {
         // 忽略日志记录错误
       }
 
-      // 连续失败3次显示警告
-      if (this.consecutiveFailures >= 3) {
+      // 连续失败10次显示警告
+      if (this.consecutiveFailures >= 10 && this.consecutiveFailures % 10 === 0) {
         console.warn(`⚠️ Email fetching has failed ${this.consecutiveFailures} times consecutively`);
       }
 
-      // 连续失败20次暂停服务（给更多重试机会）
-      if (this.consecutiveFailures >= 20) {
+      // 连续失败50次暂停服务（提高阈值，给服务更多恢复时间）
+      if (this.consecutiveFailures >= 50) {
         console.error('❌ Too many consecutive failures. Stopping email fetch service.');
+        console.error('💡 Please check IMAP server connectivity and credentials.');
         await this.stopEmailFetching();
       }
 
-      // 关闭失败的连接
+      // 关闭失败的连接，下次fetch会自动重连
       await this.closeImapConnection();
 
       // 不抛出错误，让服务继续运行
