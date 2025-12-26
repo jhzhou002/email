@@ -86,37 +86,57 @@ export class EmailService {
   }
 
   /**
-   * 连接或重连IMAP
+   * 连接或重连IMAP - 改进版
    */
   private async ensureImapConnection(config: any): Promise<void> {
-    // 防止并发连接
-    if (this.isConnecting) {
-      // 不将"连接进行中"视为错误，只是跳过此次尝试
-      console.debug('Connection attempt already in progress, skipping...');
-      return;
+    // 检查现有连接是否可用
+    if (this.imapClient) {
+      try {
+        // 验证连接是否真的可用
+        if (this.imapClient.usable) {
+          console.debug('✅ Existing IMAP connection is usable');
+          return;
+        } else {
+          console.log('⚠️ IMAP connection exists but not usable, reconnecting...');
+          await this.closeImapConnection();
+        }
+      } catch (error: any) {
+        console.log('⚠️ Error checking connection status:', error.message);
+        await this.closeImapConnection();
+      }
     }
 
-    // 限制重连频率（至少间隔2秒，从5秒减少以便更快恢复）
+    // 防止并发连接
+    if (this.isConnecting) {
+      console.debug('⏳ Connection attempt already in progress, waiting...');
+      // 等待当前连接尝试完成（最多5秒）
+      const maxWait = 50; // 50 * 100ms = 5秒
+      for (let i = 0; i < maxWait && this.isConnecting; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      // 检查连接是否已建立
+      if (this.imapClient && this.imapClient.usable) {
+        return;
+      }
+      throw new Error('Connection attempt timeout or failed');
+    }
+
+    // 限制重连频率（至少间隔1秒）
     const now = Date.now();
-    if (now - this.lastConnectionAttempt < 2000) {
-      console.debug('Too frequent connection attempts, skipping...');
-      return;
+    const timeSinceLastAttempt = now - this.lastConnectionAttempt;
+    if (timeSinceLastAttempt < 1000) {
+      const waitTime = 1000 - timeSinceLastAttempt;
+      console.debug(`⏱️ Waiting ${waitTime}ms before reconnection...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
     this.isConnecting = true;
-    this.lastConnectionAttempt = now;
+    this.lastConnectionAttempt = Date.now();
 
     try {
-      // 检查现有连接是否可用
-      if (this.imapClient && this.imapClient.usable) {
-        this.isConnecting = false;
-        return;
-      }
+      console.log('🔄 Creating new IMAP connection...');
 
-      // 关闭旧连接
-      await this.closeImapConnection();
-
-      // 创建新连接，启用keepalive防止服务器超时
+      // 创建新连接
       this.imapClient = new ImapFlow({
         host: config.imap_server,
         port: parseInt(config.imap_port),
@@ -126,15 +146,14 @@ export class EmailService {
           pass: config.imap_pass
         },
         logger: false,
-        // 添加keepalive支持，防止连接超时
         tls: {
           rejectUnauthorized: true
         }
       });
 
-      // 监听连接关闭事件，自动触发重连
+      // 监听连接关闭事件
       this.imapClient.on('close', () => {
-        console.log('📭 IMAP connection closed, will reconnect on next fetch');
+        console.log('📭 IMAP connection closed by server');
         this.imapClient = null;
       });
 
@@ -144,11 +163,16 @@ export class EmailService {
         this.imapClient = null;
       });
 
+      // 建立连接
       await this.imapClient.connect();
-      console.log('📬 IMAP connected successfully');
+      console.log('✅ IMAP connected successfully');
 
       // 重置失败计数
       this.consecutiveFailures = 0;
+    } catch (error: any) {
+      this.imapClient = null;
+      console.error('❌ Failed to connect to IMAP:', error.message);
+      throw error;
     } finally {
       this.isConnecting = false;
     }
@@ -165,87 +189,107 @@ export class EmailService {
         throw new Error('IMAP configuration not found');
       }
 
-      // 确保IMAP连接
+      // 确保IMAP连接（每次fetch都检查）
+      console.debug('🔍 Checking IMAP connection...');
       await this.ensureImapConnection(config);
 
-      if (!this.imapClient) {
-        throw new Error('Failed to establish IMAP connection');
+      if (!this.imapClient || !this.imapClient.usable) {
+        throw new Error('IMAP connection not available');
       }
 
+      console.debug('📬 Opening INBOX...');
       // 打开收件箱
-      await this.imapClient.mailboxOpen('INBOX');
+      let lock;
+      let processedCount = 0; // 提升变量作用域
 
-      // 获取未读邮件（或最近的邮件）
-      const messages = [];
-      for await (const message of this.imapClient.fetch('1:*', {
-        envelope: true,
-        source: true
-      })) {
-        messages.push(message);
+      try {
+        lock = await this.imapClient.getMailboxLock('INBOX');
+      } catch (error: any) {
+        console.error('Failed to get mailbox lock:', error.message);
+        throw new Error('Failed to access INBOX');
       }
 
-      // 处理最新的50封邮件（避免一次性处理太多）
-      const recentMessages = messages.slice(-50);
-      let processedCount = 0;
+      try {
+        // 获取最近的邮件（避免拉取全部）
+        const messages = [];
+        console.debug('📥 Fetching recent emails...');
 
-      for (const message of recentMessages) {
-        try {
-          // 解析邮件
-          if (!message.source) continue;
-          const parsed = await simpleParser(message.source);
-
-          // 提取收件人
-          const toAddr = this.extractToAddress(parsed);
-
-          if (!toAddr) continue;
-
-          // 检查邮件是否已存在
-          const [existing] = await pool.query<RowDataPacket[]>(
-            'SELECT id FROM emails WHERE from_addr = ? AND subject = ? AND received_at = ?',
-            [parsed.from?.text || '', parsed.subject || '', parsed.date || new Date()]
-          );
-
-          if (existing.length > 0) continue;
-
-          // 查找对应用户
-          const [users] = await pool.query<RowDataPacket[]>(
-            'SELECT id FROM users WHERE email = ?',
-            [toAddr]
-          );
-
-          if (users.length === 0) continue;
-
-          const userId = users[0].id;
-
-          // 提取验证码
-          const bodyText = parsed.text || '';
-          const bodyHtml = parsed.html || '';
-          const extractedCode = extractVerificationCode(bodyText + ' ' + bodyHtml);
-
-          // 判断是否为验证码邮件
-          const priority = isVerificationEmail(parsed.subject || '', bodyText) ? 1 : 0;
-
-          // 保存到数据库
-          await pool.query(
-            `INSERT INTO emails (user_id, from_addr, to_addr, subject, body_html, body_text, extracted_code, priority, received_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              userId,
-              parsed.from?.text || '',
-              toAddr,
-              parsed.subject || '',
-              bodyHtml || null,
-              bodyText || null,
-              extractedCode,
-              priority,
-              parsed.date || new Date()
-            ]
-          );
-
-          processedCount++;
-        } catch (error) {
-          console.error('Error processing email:', error);
+        for await (const message of this.imapClient.fetch('1:*', {
+          envelope: true,
+          source: true
+        })) {
+          messages.push(message);
         }
+
+        console.debug(`📊 Found ${messages.length} total emails`);
+
+        // 处理最新的50封邮件（避免一次性处理太多）
+        const recentMessages = messages.slice(-50);
+
+        for (const message of recentMessages) {
+          try {
+            // 解析邮件
+            if (!message.source) continue;
+            const parsed = await simpleParser(message.source);
+
+            // 提取收件人
+            const toAddr = this.extractToAddress(parsed);
+
+            if (!toAddr) continue;
+
+            // 检查邮件是否已存在
+            const [existing] = await pool.query<RowDataPacket[]>(
+              'SELECT id FROM emails WHERE from_addr = ? AND subject = ? AND received_at = ?',
+              [parsed.from?.text || '', parsed.subject || '', parsed.date || new Date()]
+            );
+
+            if (existing.length > 0) continue;
+
+            // 查找对应用户
+            const [users] = await pool.query<RowDataPacket[]>(
+              'SELECT id FROM users WHERE email = ?',
+              [toAddr]
+            );
+
+            if (users.length === 0) continue;
+
+            const userId = users[0].id;
+
+            // 提取验证码
+            const bodyText = parsed.text || '';
+            const bodyHtml = parsed.html || '';
+            const extractedCode = extractVerificationCode(bodyText + ' ' + bodyHtml);
+
+            // 判断是否为验证码邮件
+            const priority = isVerificationEmail(parsed.subject || '', bodyText) ? 1 : 0;
+
+            // 保存到数据库
+            await pool.query(
+              `INSERT INTO emails (user_id, from_addr, to_addr, subject, body_html, body_text, extracted_code, priority, received_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                userId,
+                parsed.from?.text || '',
+                toAddr,
+                parsed.subject || '',
+                bodyHtml || null,
+                bodyText || null,
+                extractedCode,
+                priority,
+                parsed.date || new Date()
+              ]
+            );
+
+            processedCount++;
+          } catch (error) {
+            console.error('Error processing email:', error);
+          }
+        }
+
+        console.debug(`✅ Processed ${processedCount} new emails`);
+      } finally {
+        // 释放邮箱锁
+        lock.release();
       }
 
       // 重置失败计数
