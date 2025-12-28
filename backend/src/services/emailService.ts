@@ -7,9 +7,13 @@ import { RowDataPacket, ResultSetHeader } from 'mysql2';
 export class EmailService {
   private imapClient: ImapFlow | null = null;
   private fetchInterval: NodeJS.Timeout | null = null;
+  private keepaliveInterval: NodeJS.Timeout | null = null;
   private consecutiveFailures = 0;
   private isConnecting = false;
+  private isFetching = false; // 抓取互斥锁
   private lastConnectionAttempt = 0;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private retryCount = 0; // 重连次数计数器
 
   /**
    * 启动IMAP邮件拉取定时任务
@@ -49,6 +53,16 @@ export class EmailService {
       this.fetchInterval = null;
     }
 
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval);
+      this.keepaliveInterval = null;
+    }
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
     await this.closeImapConnection();
 
     console.log('Email fetching service stopped');
@@ -83,6 +97,66 @@ export class EmailService {
     } catch (error: any) {
       return { success: false, message: error.message };
     }
+  }
+
+  /**
+   * 调度重连 - 带指数退避
+   */
+  private scheduleReconnect() {
+    // 如果已经在重连中,不重复调度
+    if (this.reconnectTimeout || this.isConnecting) {
+      return;
+    }
+
+    // 计算退避延迟: 1s, 2s, 4s, 8s, 16s, 最多30s
+    const delay = Math.min(30000, 1000 * Math.pow(2, this.retryCount));
+    this.retryCount++;
+
+    console.log(`🔄 Scheduling reconnect in ${delay}ms (attempt ${this.retryCount})...`);
+
+    this.reconnectTimeout = setTimeout(async () => {
+      this.reconnectTimeout = null;
+      try {
+        const config = await this.getImapConfig();
+        if (config) {
+          await this.ensureImapConnection(config);
+        }
+      } catch (error: any) {
+        console.error('❌ Reconnect failed:', error.message);
+        // 重连失败,继续调度下一次
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  /**
+   * 启动保活机制
+   */
+  private startKeepAlive() {
+    // 清除旧的keepalive
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval);
+    }
+
+    // 每2分钟发送NOOP保活
+    this.keepaliveInterval = setInterval(async () => {
+      if (!this.imapClient || !this.imapClient.usable) {
+        console.warn('⚠️ Keepalive: Connection not usable');
+        return;
+      }
+
+      try {
+        await this.imapClient.noop();
+        console.debug('💓 Keepalive: NOOP sent successfully');
+      } catch (error: any) {
+        console.error('❌ Keepalive failed:', error.message);
+        // Keepalive失败,标记连接不可用并触发重连
+        this.imapClient = null;
+        this.scheduleReconnect();
+      }
+    }, 2 * 60 * 1000); // 2分钟
+
+    console.log('💓 Keepalive started (interval: 2 minutes)');
   }
 
   /**
@@ -151,24 +225,46 @@ export class EmailService {
         }
       });
 
-      // 监听连接关闭事件
+      // 监听连接关闭事件 - 触发自动重连
       this.imapClient.on('close', () => {
         console.log('📭 IMAP connection closed by server');
         this.imapClient = null;
+
+        // 停止keepalive
+        if (this.keepaliveInterval) {
+          clearInterval(this.keepaliveInterval);
+          this.keepaliveInterval = null;
+        }
+
+        // 触发重连
+        this.scheduleReconnect();
       });
 
-      // 监听连接错误事件
+      // 监听连接错误事件 - 触发自动重连
       this.imapClient.on('error', (err) => {
         console.error('📭 IMAP connection error:', err.message);
         this.imapClient = null;
+
+        // 停止keepalive
+        if (this.keepaliveInterval) {
+          clearInterval(this.keepaliveInterval);
+          this.keepaliveInterval = null;
+        }
+
+        // 触发重连
+        this.scheduleReconnect();
       });
 
       // 建立连接
       await this.imapClient.connect();
       console.log('✅ IMAP connected successfully');
 
-      // 重置失败计数
+      // 重置失败计数和重连计数
       this.consecutiveFailures = 0;
+      this.retryCount = 0;
+
+      // 启动保活机制
+      this.startKeepAlive();
     } catch (error: any) {
       this.imapClient = null;
       console.error('❌ Failed to connect to IMAP:', error.message);
@@ -182,6 +278,14 @@ export class EmailService {
    * 拉取邮件
    */
   private async fetchEmails(): Promise<number> {
+    // 互斥锁:防止并发fetch
+    if (this.isFetching) {
+      console.debug('⏭️ Fetch already in progress, skipping...');
+      return 0;
+    }
+
+    this.isFetching = true;
+
     try {
       const config = await this.getImapConfig();
 
@@ -348,6 +452,9 @@ export class EmailService {
 
       // 不抛出错误，让服务继续运行
       return 0;
+    } finally {
+      // 释放互斥锁
+      this.isFetching = false;
     }
   }
 
