@@ -6,56 +6,158 @@ import { RowDataPacket, ResultSetHeader } from 'mysql2';
 
 export class EmailService {
   private imapClient: ImapFlow | null = null;
-  private fetchInterval: NodeJS.Timeout | null = null;
-  private keepaliveInterval: NodeJS.Timeout | null = null;
-  private consecutiveFailures = 0;
-  private isConnecting = false;
-  private isFetching = false; // 抓取互斥锁
-  private lastConnectionAttempt = 0;
+  private isRunning = false;           // 服务运行标志
+  private isConnecting = false;        // 连接中标志
+  private isFetching = false;          // 抓取互斥锁
+  private consecutiveFailures = 0;     // 连续失败计数
+  private retryCount = 0;              // 重连次数
   private reconnectTimeout: NodeJS.Timeout | null = null;
-  private retryCount = 0; // 重连次数计数器
+  private pollTimeout: NodeJS.Timeout | null = null;
+  private useIdle = true;              // 是否使用 IDLE 模式
+  private readonly POLL_INTERVAL = 60000;  // 轮询间隔 60 秒（fallback 模式）
 
   /**
-   * 启动IMAP邮件拉取定时任务
+   * 启动IMAP邮件拉取服务
    */
   async startEmailFetching() {
     console.log('Starting email fetching service...');
 
-    // 获取IMAP配置
     const config = await this.getImapConfig();
-
     if (!config) {
       console.warn('⚠️  IMAP configuration not found. Email fetching disabled.');
       console.log('💡 Please configure IMAP settings in admin panel.');
       return;
     }
 
-    // 立即执行一次（忽略错误，不阻塞启动）
+    this.isRunning = true;
+
+    // 启动主循环
+    this.runMainLoop();
+
+    console.log('✅ Email fetching service started');
+    console.log('� Email service is active');
+  }
+
+  /**
+   * 主循环：优先 IDLE，fallback 轮询
+   */
+  private async runMainLoop() {
+    if (!this.isRunning) return;
+
     try {
-      await this.fetchEmails();
+      const config = await this.getImapConfig();
+      if (!config) {
+        this.scheduleNextPoll();
+        return;
+      }
+
+      // 确保连接
+      await this.ensureConnection(config);
+
+      if (!this.imapClient || !this.imapClient.usable) {
+        console.warn('⚠️ Connection not ready, will retry...');
+        this.scheduleNextPoll();
+        return;
+      }
+
+      // 先拉取新邮件
+      await this.fetchNewEmails();
+
+      // 尝试使用 IDLE 模式
+      if (this.useIdle) {
+        await this.runIdleMode();
+      } else {
+        this.scheduleNextPoll();
+      }
     } catch (error: any) {
-      console.error('⚠️  Initial email fetch failed:', error.message);
-      console.log('💡 Please check IMAP configuration. Service will continue running.');
+      console.error('❌ Main loop error:', error.message);
+      this.handleConnectionError();
+    }
+  }
+
+  /**
+   * IDLE 模式：实时监听新邮件
+   */
+  private async runIdleMode() {
+    if (!this.imapClient || !this.imapClient.usable || !this.isRunning) {
+      this.scheduleNextPoll();
+      return;
     }
 
-    // 每10秒执行一次
-    this.fetchInterval = setInterval(async () => {
-      await this.fetchEmails();
-    }, 10000);
+    try {
+      console.log('📨 Entering IDLE mode...');
+
+      // 打开收件箱
+      await this.imapClient.mailboxOpen('INBOX');
+
+      // 监听新邮件事件
+      this.imapClient.on('exists', async (data: { count: number }) => {
+        console.log(`� New email detected! Total: ${data.count}`);
+        await this.fetchNewEmails();
+      });
+
+      // 进入 IDLE（最多等待 5 分钟后自动刷新）
+      while (this.isRunning && this.imapClient?.usable) {
+        try {
+          await this.imapClient.idle();
+          // IDLE 返回后（超时或有事件），拉取新邮件
+          await this.fetchNewEmails();
+        } catch (idleError: any) {
+          if (idleError.message?.includes('IDLE')) {
+            console.warn('⚠️ IDLE not supported, switching to polling mode');
+            this.useIdle = false;
+            break;
+          }
+          throw idleError;
+        }
+      }
+
+      // 如果 IDLE 不可用，切换到轮询
+      if (!this.useIdle) {
+        this.scheduleNextPoll();
+      }
+    } catch (error: any) {
+      console.error('❌ IDLE mode error:', error.message);
+
+      // 如果是 IDLE 不支持的错误，降级到轮询
+      if (error.message?.includes('IDLE') || error.message?.includes('not supported')) {
+        console.log('⚠️ IDLE not supported, falling back to polling mode');
+        this.useIdle = false;
+      }
+
+      this.handleConnectionError();
+    }
+  }
+
+  /**
+   * 调度下一次轮询（链式调度，非固定 interval）
+   */
+  private scheduleNextPoll() {
+    if (!this.isRunning) return;
+
+    if (this.pollTimeout) {
+      clearTimeout(this.pollTimeout);
+    }
+
+    console.log(`⏰ Next poll in ${this.POLL_INTERVAL / 1000} seconds...`);
+
+    this.pollTimeout = setTimeout(() => {
+      this.pollTimeout = null;
+      this.runMainLoop();
+    }, this.POLL_INTERVAL);
   }
 
   /**
    * 停止邮件拉取
    */
   async stopEmailFetching() {
-    if (this.fetchInterval) {
-      clearInterval(this.fetchInterval);
-      this.fetchInterval = null;
-    }
+    console.log('Stopping email fetching service...');
 
-    if (this.keepaliveInterval) {
-      clearInterval(this.keepaliveInterval);
-      this.keepaliveInterval = null;
+    this.isRunning = false;
+
+    if (this.pollTimeout) {
+      clearTimeout(this.pollTimeout);
+      this.pollTimeout = null;
     }
 
     if (this.reconnectTimeout) {
@@ -63,154 +165,38 @@ export class EmailService {
       this.reconnectTimeout = null;
     }
 
-    await this.closeImapConnection();
+    await this.closeConnection();
 
     console.log('Email fetching service stopped');
   }
 
   /**
-   * 安全关闭IMAP连接
+   * 确保 IMAP 连接
    */
-  private async closeImapConnection() {
-    if (this.imapClient) {
-      try {
-        // 检查连接状态
-        if (this.imapClient.usable) {
-          await this.imapClient.logout();
-        }
-      } catch (error: any) {
-        // 忽略关闭时的错误
-        console.debug('Error closing IMAP connection:', error.message);
-      } finally {
-        this.imapClient = null;
-      }
-    }
-  }
-
-  /**
-   * 手动触发邮件拉取
-   */
-  async manualFetch(): Promise<{ success: boolean; message: string; count?: number }> {
-    try {
-      const count = await this.fetchEmails();
-      return { success: true, message: 'Fetch completed', count };
-    } catch (error: any) {
-      return { success: false, message: error.message };
-    }
-  }
-
-  /**
-   * 调度重连 - 带指数退避
-   */
-  private scheduleReconnect() {
-    // 如果已经在重连中,不重复调度
-    if (this.reconnectTimeout || this.isConnecting) {
+  private async ensureConnection(config: any): Promise<void> {
+    // 连接可用则直接返回
+    if (this.imapClient?.usable) {
       return;
-    }
-
-    // 计算退避延迟: 1s, 2s, 4s, 8s, 16s, 最多30s
-    const delay = Math.min(30000, 1000 * Math.pow(2, this.retryCount));
-    this.retryCount++;
-
-    console.log(`🔄 Scheduling reconnect in ${delay}ms (attempt ${this.retryCount})...`);
-
-    this.reconnectTimeout = setTimeout(async () => {
-      this.reconnectTimeout = null;
-      try {
-        const config = await this.getImapConfig();
-        if (config) {
-          await this.ensureImapConnection(config);
-        }
-      } catch (error: any) {
-        console.error('❌ Reconnect failed:', error.message);
-        // 重连失败,继续调度下一次
-        this.scheduleReconnect();
-      }
-    }, delay);
-  }
-
-  /**
-   * 启动保活机制
-   */
-  private startKeepAlive() {
-    // 清除旧的keepalive
-    if (this.keepaliveInterval) {
-      clearInterval(this.keepaliveInterval);
-    }
-
-    // 每2分钟发送NOOP保活
-    this.keepaliveInterval = setInterval(async () => {
-      if (!this.imapClient || !this.imapClient.usable) {
-        console.warn('⚠️ Keepalive: Connection not usable');
-        return;
-      }
-
-      try {
-        await this.imapClient.noop();
-        console.debug('💓 Keepalive: NOOP sent successfully');
-      } catch (error: any) {
-        console.error('❌ Keepalive failed:', error.message);
-        // Keepalive失败,标记连接不可用并触发重连
-        this.imapClient = null;
-        this.scheduleReconnect();
-      }
-    }, 2 * 60 * 1000); // 2分钟
-
-    console.log('💓 Keepalive started (interval: 2 minutes)');
-  }
-
-  /**
-   * 连接或重连IMAP - 改进版
-   */
-  private async ensureImapConnection(config: any): Promise<void> {
-    // 检查现有连接是否可用
-    if (this.imapClient) {
-      try {
-        // 验证连接是否真的可用
-        if (this.imapClient.usable) {
-          console.debug('✅ Existing IMAP connection is usable');
-          return;
-        } else {
-          console.log('⚠️ IMAP connection exists but not usable, reconnecting...');
-          await this.closeImapConnection();
-        }
-      } catch (error: any) {
-        console.log('⚠️ Error checking connection status:', error.message);
-        await this.closeImapConnection();
-      }
     }
 
     // 防止并发连接
     if (this.isConnecting) {
-      console.debug('⏳ Connection attempt already in progress, waiting...');
-      // 等待当前连接尝试完成（最多5秒）
-      const maxWait = 50; // 50 * 100ms = 5秒
-      for (let i = 0; i < maxWait && this.isConnecting; i++) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+      // 等待连接完成（最多 10 秒）
+      for (let i = 0; i < 100 && this.isConnecting; i++) {
+        await new Promise(r => setTimeout(r, 100));
       }
-      // 检查连接是否已建立
-      if (this.imapClient && this.imapClient.usable) {
-        return;
-      }
-      throw new Error('Connection attempt timeout or failed');
-    }
-
-    // 限制重连频率（至少间隔1秒）
-    const now = Date.now();
-    const timeSinceLastAttempt = now - this.lastConnectionAttempt;
-    if (timeSinceLastAttempt < 1000) {
-      const waitTime = 1000 - timeSinceLastAttempt;
-      console.debug(`⏱️ Waiting ${waitTime}ms before reconnection...`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      if (this.imapClient?.usable) return;
+      throw new Error('Connection attempt timeout');
     }
 
     this.isConnecting = true;
-    this.lastConnectionAttempt = Date.now();
 
     try {
+      // 先关闭旧连接
+      await this.closeConnection();
+
       console.log('🔄 Creating new IMAP connection...');
 
-      // 创建新连接
       this.imapClient = new ImapFlow({
         host: config.imap_server,
         port: parseInt(config.imap_port),
@@ -222,52 +208,40 @@ export class EmailService {
         logger: false,
         tls: {
           rejectUnauthorized: true
-        }
+        },
+        // 增加超时时间
+        socketTimeout: 30000,
+        greetingTimeout: 15000
       });
 
-      // 监听连接关闭事件 - 触发自动重连
+      // 监听连接关闭
       this.imapClient.on('close', () => {
-        console.log('📭 IMAP connection closed by server');
+        console.log('📭 IMAP connection closed');
         this.imapClient = null;
-
-        // 停止keepalive
-        if (this.keepaliveInterval) {
-          clearInterval(this.keepaliveInterval);
-          this.keepaliveInterval = null;
+        if (this.isRunning) {
+          this.scheduleReconnect();
         }
-
-        // 触发重连
-        this.scheduleReconnect();
       });
 
-      // 监听连接错误事件 - 触发自动重连
+      // 监听错误
       this.imapClient.on('error', (err) => {
-        console.error('📭 IMAP connection error:', err.message);
+        console.error('📭 IMAP error:', err.message);
         this.imapClient = null;
-
-        // 停止keepalive
-        if (this.keepaliveInterval) {
-          clearInterval(this.keepaliveInterval);
-          this.keepaliveInterval = null;
+        if (this.isRunning) {
+          this.scheduleReconnect();
         }
-
-        // 触发重连
-        this.scheduleReconnect();
       });
 
-      // 建立连接
       await this.imapClient.connect();
-      console.log('✅ IMAP connected successfully');
+      console.log('📬 IMAP connected successfully');
 
-      // 重置失败计数和重连计数
+      // 重置计数器
       this.consecutiveFailures = 0;
       this.retryCount = 0;
 
-      // 启动保活机制
-      this.startKeepAlive();
     } catch (error: any) {
       this.imapClient = null;
-      console.error('❌ Failed to connect to IMAP:', error.message);
+      console.error('❌ IMAP connection failed:', error.message);
       throw error;
     } finally {
       this.isConnecting = false;
@@ -275,186 +249,231 @@ export class EmailService {
   }
 
   /**
-   * 拉取邮件
+   * 关闭 IMAP 连接
    */
-  private async fetchEmails(): Promise<number> {
-    // 互斥锁:防止并发fetch
+  private async closeConnection() {
+    if (this.imapClient) {
+      try {
+        if (this.imapClient.usable) {
+          await this.imapClient.logout();
+        }
+      } catch (e) {
+        // 忽略关闭错误
+      }
+      this.imapClient = null;
+    }
+  }
+
+  /**
+   * 处理连接错误
+   */
+  private handleConnectionError() {
+    this.consecutiveFailures++;
+
+    // 连续失败 50 次停止服务
+    if (this.consecutiveFailures >= 50) {
+      console.error('❌ Too many failures. Stopping service.');
+      this.stopEmailFetching();
+      return;
+    }
+
+    this.scheduleReconnect();
+  }
+
+  /**
+   * 调度重连（指数退避）
+   */
+  private scheduleReconnect() {
+    if (this.reconnectTimeout || !this.isRunning) return;
+
+    const delay = Math.min(60000, 1000 * Math.pow(2, this.retryCount));
+    this.retryCount++;
+
+    console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${this.retryCount})...`);
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnectTimeout = null;
+      this.runMainLoop();
+    }, delay);
+  }
+
+  /**
+   * 获取上次同步的 UID
+   */
+  private async getLastUid(): Promise<number> {
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT `value` FROM settings WHERE `key` = 'last_imap_uid'"
+      );
+      return rows.length > 0 ? parseInt(rows[0].value) || 0 : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * 保存最后同步的 UID
+   */
+  private async saveLastUid(uid: number): Promise<void> {
+    try {
+      await pool.query(
+        "INSERT INTO settings (`key`, `value`) VALUES ('last_imap_uid', ?) ON DUPLICATE KEY UPDATE `value` = ?",
+        [uid.toString(), uid.toString()]
+      );
+    } catch (e) {
+      console.error('Failed to save last UID');
+    }
+  }
+
+  /**
+   * 拉取新邮件（UID 增量同步）
+   */
+  private async fetchNewEmails(): Promise<number> {
     if (this.isFetching) {
       console.debug('⏭️ Fetch already in progress, skipping...');
       return 0;
     }
 
+    if (!this.imapClient?.usable) {
+      console.warn('⚠️ Connection not usable for fetching');
+      return 0;
+    }
+
     this.isFetching = true;
+    let processedCount = 0;
+    let maxUid = 0;
 
     try {
-      const config = await this.getImapConfig();
+      // 获取上次同步的 UID
+      const lastUid = await this.getLastUid();
+      console.debug(`📥 Fetching emails with UID > ${lastUid}...`);
 
-      if (!config) {
-        throw new Error('IMAP configuration not found');
-      }
-
-      // 确保IMAP连接（每次fetch都检查）
-      console.debug('🔍 Checking IMAP connection...');
-      await this.ensureImapConnection(config);
-
-      if (!this.imapClient || !this.imapClient.usable) {
-        throw new Error('IMAP connection not available');
-      }
-
-      console.debug('📬 Opening INBOX...');
-      // 打开收件箱
-      let lock;
-      let processedCount = 0; // 提升变量作用域
-
+      // 打开收件箱（如果还没打开）
       try {
-        lock = await this.imapClient.getMailboxLock('INBOX');
-      } catch (error: any) {
-        console.error('Failed to get mailbox lock:', error.message);
-        throw new Error('Failed to access INBOX');
+        await this.imapClient.mailboxOpen('INBOX');
+      } catch {
+        // 可能已经打开了
       }
 
-      try {
-        // 获取最近的邮件（避免拉取全部）
-        const messages = [];
-        console.debug('📥 Fetching recent emails...');
+      // 只拉取 UID 大于 lastUid 的新邮件
+      const range = lastUid > 0 ? `${lastUid + 1}:*` : '1:*';
 
-        for await (const message of this.imapClient.fetch('1:*', {
-          envelope: true,
-          source: true
-        })) {
-          messages.push(message);
+      // 第一次同步时，只拉最近 50 封
+      let fetchCount = 0;
+      const isFirstSync = lastUid === 0;
+      const maxFirstSync = 50;
+
+      for await (const message of this.imapClient.fetch(range, {
+        uid: true,
+        envelope: true,
+        source: true
+      })) {
+        // 第一次同步限制数量
+        if (isFirstSync && fetchCount >= maxFirstSync) {
+          console.log(`⚠️ First sync: limiting to ${maxFirstSync} emails`);
+          break;
         }
+        fetchCount++;
 
-        console.debug(`📊 Found ${messages.length} total emails`);
+        try {
+          if (!message.source || !message.uid) continue;
 
-        // 处理最新的50封邮件（避免一次性处理太多）
-        const recentMessages = messages.slice(-50);
+          // 更新最大 UID
+          maxUid = Math.max(maxUid, message.uid);
 
-        for (const message of recentMessages) {
-          try {
-            // 解析邮件
-            if (!message.source) continue;
-            const parsed = await simpleParser(message.source);
+          // 解析邮件
+          const parsed = await simpleParser(message.source);
+          const toAddr = this.extractToAddress(parsed);
+          if (!toAddr) continue;
 
-            // 提取收件人
-            const toAddr = this.extractToAddress(parsed);
+          // 用 UID 检查是否已存在（更高效）
+          const [existing] = await pool.query<RowDataPacket[]>(
+            'SELECT id FROM emails WHERE imap_uid = ?',
+            [message.uid]
+          );
+          if (existing.length > 0) continue;
 
-            if (!toAddr) continue;
+          // 查找对应用户
+          const [users] = await pool.query<RowDataPacket[]>(
+            'SELECT id FROM users WHERE email = ?',
+            [toAddr]
+          );
+          if (users.length === 0) continue;
 
-            // 检查邮件是否已存在
-            const [existing] = await pool.query<RowDataPacket[]>(
-              'SELECT id FROM emails WHERE from_addr = ? AND subject = ? AND received_at = ?',
-              [parsed.from?.text || '', parsed.subject || '', parsed.date || new Date()]
-            );
+          const userId = users[0].id;
 
-            if (existing.length > 0) continue;
+          // 提取验证码
+          const bodyText = parsed.text || '';
+          const bodyHtml = parsed.html || '';
+          const extractedCode = extractVerificationCode(bodyText + ' ' + bodyHtml);
+          const priority = isVerificationEmail(parsed.subject || '', bodyText) ? 1 : 0;
 
-            // 查找对应用户
-            const [users] = await pool.query<RowDataPacket[]>(
-              'SELECT id FROM users WHERE email = ?',
-              [toAddr]
-            );
+          // 保存到数据库（包含 imap_uid）
+          await pool.query(
+            `INSERT INTO emails (user_id, from_addr, to_addr, subject, body_html, body_text, extracted_code, priority, received_at, imap_uid)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              userId,
+              parsed.from?.text || '',
+              toAddr,
+              parsed.subject || '',
+              bodyHtml || null,
+              bodyText || null,
+              extractedCode,
+              priority,
+              parsed.date || new Date(),
+              message.uid
+            ]
+          );
 
-            if (users.length === 0) continue;
-
-            const userId = users[0].id;
-
-            // 提取验证码
-            const bodyText = parsed.text || '';
-            const bodyHtml = parsed.html || '';
-            const extractedCode = extractVerificationCode(bodyText + ' ' + bodyHtml);
-
-            // 判断是否为验证码邮件
-            const priority = isVerificationEmail(parsed.subject || '', bodyText) ? 1 : 0;
-
-            // 保存到数据库
-            await pool.query(
-              `INSERT INTO emails (user_id, from_addr, to_addr, subject, body_html, body_text, extracted_code, priority, received_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [
-                userId,
-                parsed.from?.text || '',
-                toAddr,
-                parsed.subject || '',
-                bodyHtml || null,
-                bodyText || null,
-                extractedCode,
-                priority,
-                parsed.date || new Date()
-              ]
-            );
-
-            processedCount++;
-          } catch (error) {
-            console.error('Error processing email:', error);
-          }
+          processedCount++;
+          console.debug(`✅ Saved email: ${parsed.subject?.substring(0, 30)}...`);
+        } catch (msgError: any) {
+          console.error('Error processing email:', msgError.message);
         }
-
-        console.debug(`✅ Processed ${processedCount} new emails`);
-      } finally {
-        // 释放邮箱锁
-        lock.release();
       }
 
-      // 重置失败计数
+      // 保存最大 UID
+      if (maxUid > lastUid) {
+        await this.saveLastUid(maxUid);
+        console.log(`📊 Synced ${processedCount} new emails, last UID: ${maxUid}`);
+      }
+
+      // 更新状态
+      await this.updateStatus('success');
+      if (processedCount > 0) {
+        await this.logFetch('success', `Fetched ${processedCount} new emails`);
+      }
+
       this.consecutiveFailures = 0;
-
-      // 更新IMAP检查状态为成功
-      try {
-        await pool.query(
-          'INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
-          ['last_imap_check', 'success', 'success']
-        );
-      } catch (error) {
-        // 忽略更新状态错误
-      }
-
-      // 记录日志
-      await this.logFetch('success', `Fetched ${processedCount} new emails`);
-
       return processedCount;
+
     } catch (error: any) {
-      this.consecutiveFailures++;
-
       console.error('Email fetch error:', error.message);
-
-      // 更新IMAP检查状态为失败
-      try {
-        await pool.query(
-          'INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
-          ['last_imap_check', 'failed', 'failed']
-        );
-      } catch (updateError) {
-        // 忽略更新状态错误
-      }
-
-      // 记录错误日志
-      try {
-        await this.logFetch('error', `Failed to fetch emails: ${error.message}`);
-      } catch (logError) {
-        // 忽略日志记录错误
-      }
-
-      // 连续失败10次显示警告
-      if (this.consecutiveFailures >= 10 && this.consecutiveFailures % 10 === 0) {
-        console.warn(`⚠️ Email fetching has failed ${this.consecutiveFailures} times consecutively`);
-      }
-
-      // 连续失败50次暂停服务（提高阈值，给服务更多恢复时间）
-      if (this.consecutiveFailures >= 50) {
-        console.error('❌ Too many consecutive failures. Stopping email fetch service.');
-        console.error('💡 Please check IMAP server connectivity and credentials.');
-        await this.stopEmailFetching();
-      }
-
-      // 关闭失败的连接，下次fetch会自动重连
-      await this.closeImapConnection();
-
-      // 不抛出错误，让服务继续运行
+      await this.updateStatus('failed');
+      await this.logFetch('error', `Fetch failed: ${error.message}`);
+      this.consecutiveFailures++;
       return 0;
     } finally {
-      // 释放互斥锁
       this.isFetching = false;
+    }
+  }
+
+  /**
+   * 手动触发邮件拉取
+   */
+  async manualFetch(): Promise<{ success: boolean; message: string; count?: number }> {
+    try {
+      const config = await this.getImapConfig();
+      if (!config) {
+        return { success: false, message: 'IMAP not configured' };
+      }
+
+      await this.ensureConnection(config);
+      const count = await this.fetchNewEmails();
+      return { success: true, message: 'Fetch completed', count };
+    } catch (error: any) {
+      return { success: false, message: error.message };
     }
   }
 
@@ -462,7 +481,6 @@ export class EmailService {
    * 提取收件人地址
    */
   private extractToAddress(parsed: ParsedMail): string | null {
-    // 从 To 字段提取
     if (parsed.to) {
       const toArray = Array.isArray(parsed.to) ? parsed.to : [parsed.to];
       if (toArray.length > 0 && toArray[0].value && toArray[0].value.length > 0) {
@@ -470,7 +488,6 @@ export class EmailService {
       }
     }
 
-    // 从 headers 中提取 Delivered-To
     const deliveredTo = parsed.headers.get('delivered-to');
     if (deliveredTo) {
       return deliveredTo.toString();
@@ -480,11 +497,25 @@ export class EmailService {
   }
 
   /**
+   * 更新状态
+   */
+  private async updateStatus(status: string) {
+    try {
+      await pool.query(
+        "INSERT INTO settings (`key`, `value`) VALUES ('last_imap_check', ?) ON DUPLICATE KEY UPDATE `value` = ?",
+        [status, status]
+      );
+    } catch {
+      // 忽略
+    }
+  }
+
+  /**
    * 获取IMAP配置
    */
   private async getImapConfig(): Promise<any> {
     const [settings] = await pool.query<RowDataPacket[]>(
-      `SELECT \`key\`, \`value\` FROM settings WHERE \`key\` IN ('imap_server', 'imap_port', 'imap_user', 'imap_pass')`
+      "SELECT `key`, `value` FROM settings WHERE `key` IN ('imap_server', 'imap_port', 'imap_user', 'imap_pass')"
     );
 
     if (settings.length === 0) return null;
@@ -494,6 +525,11 @@ export class EmailService {
       config[setting.key] = setting.value;
     });
 
+    // 验证必要字段
+    if (!config.imap_server || !config.imap_user || !config.imap_pass) {
+      return null;
+    }
+
     return config;
   }
 
@@ -501,10 +537,14 @@ export class EmailService {
    * 记录拉取日志
    */
   private async logFetch(type: string, content: string) {
-    await pool.query(
-      'INSERT INTO logs (type, user_id, content, ip) VALUES (?, ?, ?, ?)',
-      ['email_fetch', null, `[${type}] ${content}`, null]
-    );
+    try {
+      await pool.query(
+        'INSERT INTO logs (type, user_id, content, ip) VALUES (?, ?, ?, ?)',
+        ['email_fetch', null, `[${type}] ${content}`, null]
+      );
+    } catch {
+      // 忽略
+    }
   }
 
   /**
@@ -532,19 +572,13 @@ export class EmailService {
 
       await client.connect();
       await client.mailboxOpen('INBOX');
-
       await client.logout();
 
       return { success: true, message: 'IMAP connection successful' };
     } catch (error: any) {
       if (client) {
-        try {
-          await client.logout();
-        } catch (e) {
-          // 忽略
-        }
+        try { await client.logout(); } catch { }
       }
-
       return { success: false, message: `IMAP connection failed: ${error.message}` };
     }
   }
@@ -569,7 +603,6 @@ export class EmailService {
       params.push(tagId);
     }
 
-    // 获取总数
     const [countResult] = await pool.query<RowDataPacket[]>(
       `SELECT COUNT(*) as total FROM emails ${whereClause}`,
       params
@@ -577,7 +610,6 @@ export class EmailService {
 
     const total = countResult[0].total;
 
-    // 获取列表
     const [emails] = await pool.query<RowDataPacket[]>(
       `SELECT id, from_addr, subject, extracted_code, is_read, tag_id, priority, received_at, created_at
        FROM emails ${whereClause}
@@ -586,12 +618,7 @@ export class EmailService {
       [...params, pageSize, offset]
     );
 
-    return {
-      total,
-      page,
-      pageSize,
-      data: emails
-    };
+    return { total, page, pageSize, data: emails };
   }
 
   /**
@@ -603,13 +630,9 @@ export class EmailService {
       [emailId, userId]
     );
 
-    if (emails.length === 0) {
-      return null;
-    }
+    if (emails.length === 0) return null;
 
-    // 标记为已读
     await pool.query('UPDATE emails SET is_read = 1 WHERE id = ?', [emailId]);
-
     return emails[0];
   }
 
@@ -621,7 +644,6 @@ export class EmailService {
       'DELETE FROM emails WHERE id = ? AND user_id = ?',
       [emailId, userId]
     );
-
     return result.affectedRows > 0;
   }
 
@@ -633,7 +655,6 @@ export class EmailService {
       'UPDATE emails SET tag_id = ? WHERE id = ? AND user_id = ?',
       [tagId, emailId, userId]
     );
-
     return result.affectedRows > 0;
   }
 
@@ -646,7 +667,6 @@ export class EmailService {
     );
 
     await this.logFetch('cleanup', `Cleaned up ${result.affectedRows} old emails`);
-
     return result.affectedRows;
   }
 }
