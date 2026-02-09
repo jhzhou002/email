@@ -90,31 +90,41 @@ export class EmailService {
       // 打开收件箱
       await this.imapClient.mailboxOpen('INBOX');
 
-      // 监听新邮件事件
-      this.imapClient.on('exists', async (data: { count: number }) => {
-        console.log(`� New email detected! Total: ${data.count}`);
-        await this.fetchNewEmails();
-      });
-
-      // 进入 IDLE（最多等待 5 分钟后自动刷新）
+      // 进入 IDLE 循环
       while (this.isRunning && this.imapClient?.usable) {
         try {
+          // IDLE 会在超时(29分钟)或有新邮件时返回
+          console.debug('💤 IDLE: Waiting for new emails...');
           await this.imapClient.idle();
-          // IDLE 返回后（超时或有事件），拉取新邮件
+
+          // IDLE 返回，说明有新邮件或超时，拉取新邮件
+          console.log('📬 IDLE returned, fetching new emails...');
           await this.fetchNewEmails();
         } catch (idleError: any) {
-          if (idleError.message?.includes('IDLE')) {
+          // 检查是否不支持 IDLE
+          if (idleError.message?.includes('IDLE') ||
+            idleError.message?.includes('not supported')) {
             console.warn('⚠️ IDLE not supported, switching to polling mode');
             this.useIdle = false;
             break;
           }
+
+          // 其他错误，可能是连接问题
+          console.error('⚠️ IDLE error:', idleError.message);
           throw idleError;
         }
       }
 
-      // 如果 IDLE 不可用，切换到轮询
-      if (!this.useIdle) {
-        this.scheduleNextPoll();
+      // IDLE 结束，调度下一次
+      if (this.isRunning) {
+        if (this.useIdle) {
+          // 连接可能断了，重新进入主循环
+          console.log('🔄 IDLE loop ended, restarting main loop...');
+          this.scheduleReconnect();
+        } else {
+          // 降级到轮询
+          this.scheduleNextPoll();
+        }
       }
     } catch (error: any) {
       console.error('❌ IDLE mode error:', error.message);
@@ -128,6 +138,8 @@ export class EmailService {
       this.handleConnectionError();
     }
   }
+
+  /**
 
   /**
    * 调度下一次轮询（链式调度，非固定 interval）
