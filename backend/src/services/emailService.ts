@@ -142,29 +142,51 @@ export class EmailService {
 
       // 进入 IDLE 循环
       while (this.isRunning && this.imapClient?.usable) {
-        try {
-          console.debug('💤 IDLE: Waiting for new emails or timeout...');
+        // 用 AbortController 管理心跳定时器，确保连接断开时能取消定时器
+        let heartbeatTimer: NodeJS.Timeout | null = null;
+        let rejectFn: ((e: Error) => void) | null = null;
 
+        const heartbeatPromise = new Promise<never>((_, reject) => {
+          rejectFn = reject;
+          heartbeatTimer = setTimeout(
+            () => reject(new Error('IDLE_TIMEOUT_RESTART')),
+            this.IDLE_TIMEOUT
+          );
+        });
+
+        const cancelHeartbeat = () => {
+          if (heartbeatTimer) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
+        };
+
+        try {
+          console.debug('💤 IDLE: Waiting for new emails or heartbeat timeout...');
           this.updateActivity();
 
           // 使用 Promise.race 添加最大 IDLE 持续时间限制，防止被 NAT 层静默切断
           await Promise.race([
             this.imapClient.idle(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('IDLE_TIMEOUT_RESTART')), this.IDLE_TIMEOUT))
+            heartbeatPromise
           ]);
 
+          // IDLE 返回正常（有新邮件），取消心跳定时器，拉取邮件
+          cancelHeartbeat();
           this.updateActivity();
-
-          // IDLE 返回正常，说明有新邮件，拉取新邮件
           console.log('📬 IDLE returned normally, fetching new emails...');
           await this.fetchNewEmails();
+
         } catch (idleError: any) {
+          // 无论如何都先取消心跳定时器，防止泄漏
+          cancelHeartbeat();
           this.updateActivity();
 
-          // 如果是我们自己触发的定时强制唤醒
+          // 如果是我们自己触发的心跳唤醒（正常机制）
           if (idleError.message === 'IDLE_TIMEOUT_RESTART') {
-            console.log('⏱️ IDLE duration limit reached. Breaking IDLE to send heartbeat/noop...');
-            // 主动打破 idle 去抓一次（相当于一种深度的 NOOP）然后继续下一轮 while 循环
+            // 连接还活着，检查一下再继续
+            if (!this.imapClient?.usable) {
+              console.warn('⚠️ Heartbeat restart: connection lost. Breaking IDLE loop...');
+              break;
+            }
+            console.log('⏱️ Heartbeat: re-checking for new emails...');
             await this.fetchNewEmails();
             continue;
           }
@@ -177,9 +199,9 @@ export class EmailService {
             break;
           }
 
-          // 其他错误，可能是连接问题
-          console.error('⚠️ IDLE error:', idleError.message);
-          throw idleError;
+          // 其他错误（连接断开等），退出循环触发重连
+          console.error('⚠️ IDLE error, breaking loop:', idleError.message);
+          break;
         }
       }
 
