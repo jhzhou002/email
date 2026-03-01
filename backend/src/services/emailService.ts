@@ -13,8 +13,13 @@ export class EmailService {
   private retryCount = 0;              // 重连次数
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private pollTimeout: NodeJS.Timeout | null = null;
-  private useIdle = true;              // 是否使用 IDLE 模式
-  private readonly POLL_INTERVAL = 60000;  // 轮询间隔 60 秒（fallback 模式）
+  private watchdogInterval: NodeJS.Timeout | null = null; // 看门狗定时器
+  private lastActivityTime: number = Date.now();       // 最后一次活动时间
+  private useIdle = true;                              // 是否使用 IDLE 模式
+  private readonly POLL_INTERVAL = 60000;              // 轮询间隔 60 秒（fallback 模式）
+  private readonly IDLE_TIMEOUT = 14 * 60 * 1000;      // IDLE 最大持续时间（14分钟，防止 NAT 路由器静默断开）
+  private readonly WATCHDOG_INTERVAL = 5 * 60 * 1000;  // 看门狗检查间隔（5分钟）
+  private readonly WATCHDOG_TIMEOUT = 20 * 60 * 1000;  // 看门狗超时时间（20分钟无活动则强制重接）
 
   /**
    * 启动IMAP邮件拉取服务
@@ -30,6 +35,10 @@ export class EmailService {
     }
 
     this.isRunning = true;
+    this.updateActivity();
+
+    // 启动看门狗
+    this.startWatchdog();
 
     // 启动主循环
     this.runMainLoop();
@@ -76,6 +85,47 @@ export class EmailService {
   }
 
   /**
+   * 更新最后活动时间
+   */
+  private updateActivity() {
+    this.lastActivityTime = Date.now();
+  }
+
+  /**
+   * 启动看门狗：定期检查连接是否僵死
+   */
+  private startWatchdog() {
+    this.stopWatchdog();
+    this.watchdogInterval = setInterval(() => {
+      if (!this.isRunning) return;
+
+      const now = Date.now();
+      const timeSinceLastActivity = now - this.lastActivityTime;
+
+      // 如果长时间没有活动（收邮件或心跳），可能连接已僵死
+      if (timeSinceLastActivity > this.WATCHDOG_TIMEOUT) {
+        console.error(`🚨 Watchdog triggered: No activity for ${Math.round(timeSinceLastActivity / 1000 / 60)} minutes. Forcing reconnect...`);
+        this.updateActivity(); // 重置时间防止连续触发
+
+        // 强制关闭当前可能有问题的连接，然后进入重连流程
+        this.closeConnection().catch(() => { }).finally(() => {
+          this.handleConnectionError();
+        });
+      }
+    }, this.WATCHDOG_INTERVAL);
+  }
+
+  /**
+   * 停止看门狗
+   */
+  private stopWatchdog() {
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
+    }
+  }
+
+  /**
    * IDLE 模式：实时监听新邮件
    */
   private async runIdleMode() {
@@ -93,14 +143,32 @@ export class EmailService {
       // 进入 IDLE 循环
       while (this.isRunning && this.imapClient?.usable) {
         try {
-          // IDLE 会在超时(29分钟)或有新邮件时返回
-          console.debug('💤 IDLE: Waiting for new emails...');
-          await this.imapClient.idle();
+          console.debug('💤 IDLE: Waiting for new emails or timeout...');
 
-          // IDLE 返回，说明有新邮件或超时，拉取新邮件
-          console.log('📬 IDLE returned, fetching new emails...');
+          this.updateActivity();
+
+          // 使用 Promise.race 添加最大 IDLE 持续时间限制，防止被 NAT 层静默切断
+          await Promise.race([
+            this.imapClient.idle(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('IDLE_TIMEOUT_RESTART')), this.IDLE_TIMEOUT))
+          ]);
+
+          this.updateActivity();
+
+          // IDLE 返回正常，说明有新邮件，拉取新邮件
+          console.log('📬 IDLE returned normally, fetching new emails...');
           await this.fetchNewEmails();
         } catch (idleError: any) {
+          this.updateActivity();
+
+          // 如果是我们自己触发的定时强制唤醒
+          if (idleError.message === 'IDLE_TIMEOUT_RESTART') {
+            console.log('⏱️ IDLE duration limit reached. Breaking IDLE to send heartbeat/noop...');
+            // 主动打破 idle 去抓一次（相当于一种深度的 NOOP）然后继续下一轮 while 循环
+            await this.fetchNewEmails();
+            continue;
+          }
+
           // 检查是否不支持 IDLE
           if (idleError.message?.includes('IDLE') ||
             idleError.message?.includes('not supported')) {
@@ -166,6 +234,7 @@ export class EmailService {
     console.log('Stopping email fetching service...');
 
     this.isRunning = false;
+    this.stopWatchdog();
 
     if (this.pollTimeout) {
       clearTimeout(this.pollTimeout);
@@ -282,11 +351,9 @@ export class EmailService {
   private handleConnectionError() {
     this.consecutiveFailures++;
 
-    // 连续失败 50 次停止服务
-    if (this.consecutiveFailures >= 50) {
-      console.error('❌ Too many failures. Stopping service.');
-      this.stopEmailFetching();
-      return;
+    // 提醒，但不退出程序，保持服务在后台自动重连
+    if (this.consecutiveFailures % 10 === 0) {
+      console.warn(`⚠️ High failure rate: ${this.consecutiveFailures} consecutive connection failures. Will keep retrying...`);
     }
 
     this.scheduleReconnect();
@@ -298,7 +365,9 @@ export class EmailService {
   private scheduleReconnect() {
     if (this.reconnectTimeout || !this.isRunning) return;
 
-    const delay = Math.min(60000, 1000 * Math.pow(2, this.retryCount));
+    // 最多延迟 5 分钟
+    const MAX_DELAY = 5 * 60 * 1000;
+    const delay = Math.min(MAX_DELAY, 1000 * Math.pow(2, this.retryCount));
     this.retryCount++;
 
     console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${this.retryCount})...`);
@@ -452,6 +521,7 @@ export class EmailService {
       }
 
       // 更新状态
+      this.updateActivity(); // 拉取成功更新活动时间
       await this.updateStatus('success');
       if (processedCount > 0) {
         await this.logFetch('success', `Fetched ${processedCount} new emails`);
